@@ -1,0 +1,211 @@
+<!doctype html>
+
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Mapa de Impacto de Asteroides — Protótipo</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-sA+e2XkG6k2f9gqgk2q6KQh4r5b0u1jv+0sWZk/0k8M=" crossorigin=""/>
+  <style>
+    html,body,#map { height: 100%; margin: 0; }
+    body { font-family: Inter, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial; }
+    .app { display: grid; grid-template-columns: 1fr 380px; height: 100vh; }
+    #map { width: 100%; height: 100%; }
+    .sidebar { padding: 18px; background: linear-gradient(180deg,#0b1220,#0f1a2b); color: #fff; box-shadow: -6px 0 24px rgba(0,0,0,0.4); }
+    .sidebar h2 { margin: 0 0 10px 0; font-size: 20px; }
+    .control { margin-bottom: 12px; }
+    label { display:block; font-size:13px; margin-bottom:6px; color:#cfe3ff; }
+    input[type=range] { width:100%; }
+    .presets button { margin-right:6px; margin-bottom:6px; }
+    .btn { background:#1f6feb; border:none; color:white; padding:8px 10px; border-radius:8px; cursor:pointer; }
+    .btn.secondary { background:#2d3748; }
+    .stats { background: rgba(255,255,255,0.03); padding:12px; border-radius:8px; font-size:13px; }
+    .muted { color:#9fb4dd; font-size:12px; }
+    .footer { position: absolute; bottom: 12px; left: 12px; font-size:12px; color:#9fb4dd; }
+    .credits { margin-top:10px; font-size:12px; color:#9fb4dd; }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <div id="map"></div>
+    <aside class="sidebar">
+      <h2>Mapa de Impacto de Asteroides — Protótipo</h2>
+      <p class="muted">Clique no mapa para escolher o ponto de impacto. Valores e fórmulas são simplificações feitas para visualização.</p><div class="control">
+    <label for="diameter">Diâmetro do asteroide (km): <span id="diameterVal">1</span> km</label>
+    <input id="diameter" type="range" min="0.01" max="50" step="0.01" value="1" />
+  </div>
+
+  <div class="control presets">
+    <label>Predefinições</label>
+    <button class="btn" data-d="0.05">meteoro pequeno (50 m)</button>
+    <button class="btn" data-d="1">médio (1 km)</button>
+    <button class="btn" data-d="10">grande (10 km)</button>
+    <button class="btn" data-d="50">catastrófico (50 km)</button>
+  </div>
+
+  <div class="control">
+    <label>Velocidade (km/s): <span id="velVal">20</span> km/s</label>
+    <input id="velocity" type="range" min="5" max="70" step="1" value="20" />
+  </div>
+
+  <div class="control">
+    <button id="simulate" class="btn">Simular impacto</button>
+    <button id="clear" class="btn secondary">Limpar</button>
+  </div>
+
+  <div class="stats" id="results">
+    <strong>Resultados</strong>
+    <div id="resText">Clique no mapa para escolher o ponto de impacto.</div>
+  </div>
+
+  <div class="credits">
+    <div><strong>Como o protótipo calcula:</strong></div>
+    <div class="muted">Massa = densidade × volume (esfera). Energia cinética = ½ m v². Energia convertida para megatons (1 megaton ≈ 4.184×10¹⁵ J). As zonas (vermelha, laranja, amarela) são aproximações lineares em função da energia¹/³ para fins ilustrativos.</div>
+  </div>
+
+  <div class="footer">Feito por você — peça alterações (cores, números, efeitos).</div>
+</aside>
+
+  </div>  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-o9N1j7kGk0H6k2f9gqgk2q6KQh4r5b0u1jv+0sWZk/0k8M=" crossorigin=""></script>  <script>
+    // Inicializa mapa
+    const map = L.map('map', { worldCopyJump: true }).setView([20, 0], 2);
+
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 18,
+      attribution: '&copy; OpenStreetMap contributors'
+    }).addTo(map);
+
+    // UI refs
+    const diameter = document.getElementById('diameter');
+    const diameterVal = document.getElementById('diameterVal');
+    const velocity = document.getElementById('velocity');
+    const velVal = document.getElementById('velVal');
+    const simulateBtn = document.getElementById('simulate');
+    const clearBtn = document.getElementById('clear');
+    const resText = document.getElementById('resText');
+
+    diameter.addEventListener('input', ()=> diameterVal.textContent = diameter.value);
+    velocity.addEventListener('input', ()=> velVal.textContent = velocity.value);
+
+    // Preset buttons
+    document.querySelectorAll('.presets .btn').forEach(b=>{
+      b.addEventListener('click', ()=>{ diameter.value = b.dataset.d; diameterVal.textContent = b.dataset.d; });
+    });
+
+    // Variables to store current impact
+    let impactMarker = null;
+    let circles = [];
+
+    function clearImpact(){
+      if(impactMarker) { map.removeLayer(impactMarker); impactMarker = null; }
+      circles.forEach(c=>map.removeLayer(c)); circles = [];
+      resText.innerHTML = 'Clique no mapa para escolher o ponto de impacto.';
+    }
+
+    clearBtn.addEventListener('click', clearImpact);
+
+    // Função física simplificada (valores ilustrativos)
+    function computeImpact(diakm, vel_kms){
+      // constantes
+      const density = 3000; // kg/m3 (tipo rocha)
+      const d_m = diakm * 1000; // m
+      const r = d_m/2;
+      const volume = (4/3) * Math.PI * Math.pow(r,3); // m3
+      const mass = density * volume; // kg
+      const v = vel_kms * 1000; // m/s
+      const energyJ = 0.5 * mass * v * v; // Joules
+      const energyMegatons = energyJ / 4.184e15;
+
+      // estimativas de raio de dano (km) — escala R ~ k * E^(1/3)
+      // constantes k escolhidas para visualização (não são valores oficiais)
+      const k_total = 0.6;   // zona vermelha — destruição total
+      const k_severe = 1.9;  // zona laranja — danos severos
+      const k_moderate = 5.0;// zona amarela — danos moderados
+
+      const R_total_km = k_total * Math.pow(energyMegatons, 1/3);
+      const R_severe_km = k_severe * Math.pow(energyMegatons, 1/3);
+      const R_moderate_km = k_moderate * Math.pow(energyMegatons, 1/3);
+
+      // area affected
+      const area_total = Math.PI * Math.pow(R_total_km,2);
+      const area_severe = Math.PI * Math.pow(R_severe_km,2);
+      const area_moderate = Math.PI * Math.pow(R_moderate_km,2);
+
+      return {
+        mass,
+        energyJ,
+        energyMegatons,
+        R_total_km, R_severe_km, R_moderate_km,
+        area_total, area_severe, area_moderate
+      };
+    }
+
+    function humanReadable(x){
+      if (x >= 1e12) return (x/1e12).toFixed(2)+ ' T';
+      if (x >= 1e9) return (x/1e9).toFixed(2)+ ' G';
+      if (x >= 1e6) return (x/1e6).toFixed(2)+ ' M';
+      if (x >= 1e3) return (x/1e3).toFixed(2)+ ' k';
+      return x.toFixed(2);
+    }
+
+    // Função para desenhar círculos no mapa
+    function drawImpact(latlng, stats){
+      clearImpact();
+      impactMarker = L.marker(latlng).addTo(map).bindPopup('Ponto de impacto').openPopup();
+
+      // cores e opacities
+      const red = {color:'#d33', fillColor:'#d33', fillOpacity:0.45};
+      const orange = {color:'#f39c12', fillColor:'#f39c12', fillOpacity:0.30};
+      const yellow = {color:'#f1c40f', fillColor:'#f1c40f', fillOpacity:0.18};
+
+      // convert km to meters for Leaflet
+      const c1 = L.circle(latlng, { radius: stats.R_total_km*1000, ...red }).addTo(map);
+      const c2 = L.circle(latlng, { radius: stats.R_severe_km*1000, ...orange }).addTo(map);
+      const c3 = L.circle(latlng, { radius: stats.R_moderate_km*1000, ...yellow }).addTo(map);
+
+      circles.push(c1,c2,c3);
+
+      // show results
+      const text = `Diâmetro: ${diameter.value} km<br>
+        Velocidade: ${velocity.value} km/s<br>
+        Energia estimada: ${stats.energyMegatons.toExponential(3)} megatons (≈ ${humanReadable(stats.energyJ)} J)<br>
+        Raio destruição total: ${stats.R_total_km.toFixed(2)} km<br>
+        Raio danos severos: ${stats.R_severe_km.toFixed(2)} km<br>
+        Raio danos moderados: ${stats.R_moderate_km.toFixed(2)} km<br>
+        Área destruição total: ${stats.area_total.toFixed(0)} km²<br>
+        <br>
+        <em>Observação:</em> valores são aproximações para visualização e não substituem modelos científicos.<br>
+      `;
+
+      resText.innerHTML = text;
+
+      // zoom to show the largest circle (but not too close)
+      const maxR = Math.max(stats.R_moderate_km, 50);
+      map.setView(latlng, Math.max(2, Math.floor(8 - Math.log10(maxR))));
+    }
+
+    // map click handler
+    map.on('click', function(e){
+      const d = parseFloat(diameter.value);
+      const v = parseFloat(velocity.value);
+      const stats = computeImpact(d, v);
+      drawImpact(e.latlng, stats);
+    });
+
+    simulateBtn.addEventListener('click', ()=>{
+      if(!impactMarker){ resText.innerHTML = 'Primeiro clique no mapa para posicionar o impacto.'; return; }
+      const latlng = impactMarker.getLatLng();
+      const d = parseFloat(diameter.value);
+      const v = parseFloat(velocity.value);
+      const stats = computeImpact(d, v);
+      drawImpact(latlng, stats);
+    });
+
+    // inicial state
+    clearImpact();
+
+    // small helper: keyboard H to focus map
+    window.addEventListener('keydown', (ev)=>{ if(ev.key==='h') map.setView([20,0],2); });
+
+  </script></body>
+</html>
